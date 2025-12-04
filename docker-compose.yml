@@ -1,0 +1,18 @@
+services:
+  mc-smart-proxy:
+    build: .
+    container_name: minecraft_smart_proxy
+    
+    restart: unless-stopped
+    
+    ports:
+      - "25565:25565"
+    
+    environment:
+      - CRAFTY_URL
+      - CRAFTY_TOKEN
+      - SERVER_ID
+      - LISTEN_PORT
+      - REAL_SERVER_PORT
+      - REAL_SERVER_IP
+      - IDLE_TIMEOUT
