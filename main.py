@@ -64,6 +64,7 @@ last_active_time = time.time()
 proxy_process = None
 is_waking = False
 wake_start_time = 0
+lock = threading.Lock()
 
 
 # URL mantenida por la comunidad con todas las versiones
@@ -148,14 +149,13 @@ def get_server_status():
         resp = requests.get(url, headers=get_headers(), verify=False, timeout=5)
         if resp.status_code == 200:
             data = resp.json().get("data", {})
-            # DEBUG: Descomenta esto si sigue fallando para ver qué devuelve Crafty
-            # print(f"DEBUG API: running={data.get('running')} online={data.get('online')}")
             return data.get("running", False), data.get("online", 0)
         else:
             print(f"Error API Code: {resp.status_code} - {resp.text}")
+            return None
     except Exception as e:
         print(f"Error getting server status: {e}")
-    return False, 0
+        return None
 
 def start_server():
     global is_waking, wake_start_time
@@ -198,6 +198,9 @@ def stop_server():
 
 def start_proxy():
     global proxy_process, is_waking
+    if proxy_process is not None and proxy_process.poll() is not None:
+        print("⚠️ Proxy process died surprisingly. Clearing state.")
+        proxy_process = None
     if proxy_process is None:
         print(f"Server is UP. Starting socat proxy to {REAL_SERVER_IP}:{REAL_SERVER_PORT}...")
         cmd = [
@@ -205,7 +208,6 @@ def start_proxy():
             f"TCP-LISTEN:{LISTEN_PORT},fork,reuseaddr",
             f"TCP:{REAL_SERVER_IP}:{REAL_SERVER_PORT}",
         ]
-        # Usamos Popen para que no bloquee
         proxy_process = subprocess.Popen(cmd)
         is_waking = False
 
@@ -270,8 +272,8 @@ def handle_client(conn):
                 send_packet(conn, resp_payload)
 
             elif next_state == 2:  # LOGIN ATTEMPT
-                # Lanzamos el arranque (si no se estaba haciendo ya)
-                start_server()
+                with lock:
+                    start_server()
 
                 # Mensaje dinámico según lo que llevemos esperando
                 if is_waking:
@@ -333,7 +335,11 @@ def main():
     print("--- Smart Manager Started (Auto-Learning) ---")
     
     while True:
-        running, players = get_server_status()
+        status = get_server_status()
+        if status is None:
+            time.sleep(3)
+            continue
+        running, players = status
         
         if running:
             # 1. El servidor REAL está encendido
@@ -349,6 +355,7 @@ def main():
                 # -----------------------------
 
                 is_waking = False
+                last_active_time = time.time()
             
             start_proxy() # Se asegura que socat esté corriendo
             
