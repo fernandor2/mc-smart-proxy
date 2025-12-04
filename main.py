@@ -84,22 +84,42 @@ def get_protocol_map():
 
 def get_real_server_info():
     """
-    Obtiene versión y protocolo del servidor real a partir del nombre del jar.
-    TODO: Reemplazar 'crafty_filename' simulado por una llamada real a la API de Crafty.
+    Obtiene versión y protocolo del servidor real consultando la API de Crafty.
     """
-    # 1. Obtenemos el nombre del ejecutable desde Crafty (ej: "paper-1.20.4.jar")
-    crafty_filename = "server-1.20.4.jar"  # Simulado
+    # Valores por defecto (Fallback)
+    version_detectada = "1.21"
+    protocolo = 767
 
-    # 2. Extraemos la versión del texto (ej: "1.20.4")
-    match = re.search(r"(\d+\.\d+(\.\d+)?)", crafty_filename)
-    if not match:
-        return "1.21", 767  # Por defecto si falla
+    try:
+        # 1. Obtenemos los detalles del servidor desde la API
+        url = f"{CRAFTY_URL}/api/v2/servers/{SERVER_ID}"
+        resp = requests.get(url, headers=get_headers(), verify=False, timeout=5)
 
-    version_detectada = match.group(1)
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            
+            # Buscamos el comando de ejecución o el nombre del ejecutable
+            # Crafty devuelve 'execution_command' con el comando completo (ej: java -jar server-1.20.4.jar)
+            crafty_filename = data.get("execution_command") or data.get("executable") or ""
 
-    # 3. Buscamos el protocolo en nuestra lista descargada
-    protocol_map = get_protocol_map()
-    protocolo = protocol_map.get(version_detectada, 767)  # 767 es el de la 1.21
+            # 2. Extraemos la versión del texto (ej: "1.20.4")
+            match = re.search(r"(\d+\.\d+(\.\d+)?)", crafty_filename)
+            if match:
+                version_detectada = match.group(1)
+
+                # 3. Buscamos el protocolo en nuestra lista descargada
+                protocol_map = get_protocol_map()
+                protocolo = protocol_map.get(version_detectada, 767) # 767 = 1.21 default
+                
+                # Opcional: Imprimir para debug
+                # print(f"Detected version: {version_detectada} (Proto: {protocolo})")
+            else:
+                print(f"⚠️ Warning: No version number found in command '{crafty_filename}'")
+        else:
+            print(f"⚠️ API Error getting server info: {resp.status_code}")
+
+    except Exception as e:
+        print(f"⚠️ Error in get_real_server_info: {e}")
 
     return version_detectada, protocolo
 
