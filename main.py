@@ -9,7 +9,7 @@ import threading
 # --- CONFIGURATION ---
 CRAFTY_URL = os.getenv("CRAFTY_URL", "http://192.168.1.10:8443")
 TOKEN = os.getenv("CRAFTY_TOKEN", "YOUR_API_TOKEN")
-SERVER_ID = int(os.getenv("SERVER_ID", "1"))
+SERVER_ID = os.getenv("SERVER_ID", "1")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "25565"))
 REAL_SERVER_PORT = int(os.getenv("REAL_SERVER_PORT", "25599"))
 REAL_SERVER_IP = os.getenv("REAL_SERVER_IP", "127.0.0.1")
