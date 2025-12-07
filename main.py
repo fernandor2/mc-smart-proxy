@@ -196,6 +196,14 @@ def stop_server():
     except Exception as e:
         print(f"Failed to stop: {e}")
 
+def is_port_open(ip, port):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            return s.connect_ex((ip, port)) == 0
+    except:
+        return False
+
 def start_proxy():
     global proxy_process, is_waking
     if proxy_process is not None and proxy_process.poll() is not None:
@@ -205,11 +213,12 @@ def start_proxy():
         print(f"Server is UP. Starting socat proxy to {REAL_SERVER_IP}:{REAL_SERVER_PORT}...")
         cmd = [
             "socat",
-            f"TCP-LISTEN:{LISTEN_PORT},fork,reuseaddr",
-            f"TCP:{REAL_SERVER_IP}:{REAL_SERVER_PORT}",
+            f"TCP-LISTEN:{LISTEN_PORT},fork,reuseaddr,tcp-nodelay",
+            f"TCP:{REAL_SERVER_IP}:{REAL_SERVER_PORT},tcp-nodelay",
         ]
         proxy_process = subprocess.Popen(cmd)
-        is_waking = False
+        with lock:
+            is_waking = False
 
 def stop_proxy():
     global proxy_process
@@ -334,6 +343,9 @@ def main():
     global last_active_time, is_waking, wake_start_time
     print("--- Smart Manager Started (Auto-Learning) ---")
     
+    was_ready = False # Para detectar transiciones OFF -> ON
+    failed_checks = 0 # Para evitar desconexiones por lag spikes
+
     while True:
         status = get_server_status()
         if status is None:
@@ -341,20 +353,47 @@ def main():
             continue
         running, players = status
         
+        # Check if actually ready (TCP connect)
+        server_ready = False
         if running:
-            # 1. El servidor REAL está encendido
+             port_open = is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT)
+             if port_open:
+                 server_ready = True
+                 failed_checks = 0
+             else:
+                 # Si el proxy YA estaba corriendo, damos un margen de error (Lag Spike Protection)
+                 if proxy_process is not None:
+                     failed_checks += 1
+                     if failed_checks < 3:
+                         print(f"⚠️ Port check failed ({failed_checks}/3). Ignoring temporarily...")
+                         server_ready = True # Mantenemos vivo el proxy
+                     else:
+                         print("❌ Server confirmed dead after 3 failures.")
+                         server_ready = False
+                 else:
+                     # Si no estaba corriendo, simplemente no está listo
+                     server_ready = False
+        
+        if server_ready:
+            # Detectar si acaba de encenderse (Transición OFF -> ON)
+            if not was_ready:
+                print("✨ Server detected as JUST READY. Resetting idle timer.")
+                last_active_time = time.time()
+
+            # 1. El servidor REAL está encendido Y escuchando
             if is_waking:
                 print("Server detected as ONLINE!")
 
                 # --- CÁLCULO Y APRENDIZAJE ---
-                if wake_start_time > 0:
-                    actual_duration = time.time() - wake_start_time
-                    print(f"Server took {int(actual_duration)}s to start.")
-                    save_startup_time(actual_duration)
-                    wake_start_time = 0  # Reset
+                with lock:
+                    if wake_start_time > 0:
+                        actual_duration = time.time() - wake_start_time
+                        print(f"Server took {int(actual_duration)}s to start.")
+                        save_startup_time(actual_duration)
+                        wake_start_time = 0  # Reset
                 # -----------------------------
 
-                is_waking = False
+                    is_waking = False
                 last_active_time = time.time()
             
             start_proxy() # Se asegura que socat esté corriendo
@@ -370,7 +409,7 @@ def main():
             time.sleep(5) 
             
         else:
-            # 2. El servidor REAL está apagado
+            # 2. El servidor REAL está apagado O cargando (puerto cerrado)
             stop_proxy() # Asegurar que socat muere
             
             # Ejecutamos el servidor falso un ratito y volvemos
@@ -379,6 +418,9 @@ def main():
             if is_waking:
                 # Si estamos esperando que arranque, no spameamos logs, solo esperamos
                 pass
+
+        # Actualizamos el estado anterior para la siguiente iteración
+        was_ready = server_ready
 
 if __name__ == "__main__":
     main()
