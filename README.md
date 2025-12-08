@@ -54,8 +54,8 @@ services:
       # IP of the machine running the Minecraft server (Usually the host machine)
       - REAL_SERVER_IP=192.168.1.10
       
-      # Time in seconds to wait before stopping an empty server (Default: 600s / 10m)
-      - IDLE_TIMEOUT=600
+      # Time in minutes to wait before stopping an empty server (Default: 10m)
+      - IDLE_TIMEOUT=10
 ```
 
 ### 3. Running the Proxy

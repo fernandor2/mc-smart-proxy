@@ -35,10 +35,11 @@ def load_startup_time():
 def save_startup_time(seconds):
     global startup_estimate
     try:
-        startup_estimate = int(seconds)
-        with open(BOOT_CACHE_FILE, "w") as f:
-            f.write(str(startup_estimate))
-        print(f"✅ Boot time learned and saved: {startup_estimate}s")
+        with lock:
+            startup_estimate = int(seconds)
+            with open(BOOT_CACHE_FILE, "w") as f:
+                f.write(str(startup_estimate))
+            print(f"✅ Boot time learned and saved: {startup_estimate}s")
     except Exception as e:
         print(f"Failed to save boot time: {e}")
 
@@ -135,7 +136,7 @@ def send_start_request_worker():
             verify=False,
             timeout=5,
         )
-        if resp.status_code != 200:
+        if not (200 <= resp.status_code < 300):
             print(f"❌ START FAILED: Code {resp.status_code}")
             print(f"Crafty Response: {resp.text}")
         else:
@@ -176,14 +177,6 @@ def stop_server():
         )
     except Exception as e:
         print(f"Failed to stop: {e}")
-
-def is_port_open(ip, port):
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(3)
-            return s.connect_ex((ip, port)) == 0
-    except:
-        return False
 
 def start_proxy():
     global proxy_process, is_waking
@@ -256,8 +249,7 @@ def handle_client(conn):
             if next_state == 1:
                 with lock:
                     last_active_time = time.time()
-                
-                with lock:
+                    
                     if is_waking:
                         elapsed = time.time() - wake_start_time if wake_start_time > 0 else 0
                         remaining = max(0, startup_estimate - int(elapsed))
@@ -283,9 +275,8 @@ def handle_client(conn):
             elif next_state == 2:
                 with lock:
                     last_active_time = time.time()
-                start_server()
+                    start_server()
 
-                with lock:
                     if is_waking:
                         elapsed = time.time() - wake_start_time if wake_start_time > 0 else 0
                         remaining = max(0, startup_estimate - int(elapsed))
@@ -387,6 +378,8 @@ def run_fake_server():
     t.start()
 
     print(">> Fake Server Listening (Waiting for Real Server)...")
+    
+    loop_start_time = time.time()
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -396,6 +389,9 @@ def run_fake_server():
             s.settimeout(1.0)
             
             while not server_ready_evt.is_set():
+                if (time.time() - loop_start_time) > 60:
+                    break
+
                 with lock:
                     checking_waking = is_waking
                     checking_start_time = wake_start_time
@@ -425,7 +421,7 @@ def run_fake_server():
     finally:
         stop_check.set()
         t.join()
-        if not is_timeout:
+        if not is_timeout and server_ready_evt.is_set():
             print(">> Real Server Ready! Switch to Proxy.")
             
     return is_timeout
@@ -443,8 +439,8 @@ def main():
             print("⚠️ API Unreachable. Checking ping for fallback status...")
             if is_server_fully_ready(REAL_SERVER_IP, REAL_SERVER_PORT):
                 running = True
-                players = 0
-                print("   -> Ping OK. Assuming Server ON (Players=0).")
+                players = 1
+                print("   -> Ping OK. Assuming Server ON (Players=1 to prevent shutdown).")
             else:
                 running = False
                 players = 0
@@ -472,7 +468,8 @@ def main():
                         print("❌ Server confirmed dead after 3 failures.")
                         server_ready = False
                 else:
-                    server_ready = False        
+                    server_ready = False
+                    failed_checks = 0        
         if server_ready:
             if not was_ready:
                 print("✨ Server detected as JUST READY. Resetting idle timer.")
@@ -482,10 +479,9 @@ def main():
 
             with lock:
                 waking_status = is_waking
-
-            if waking_status:
-                print("Server detected as ONLINE!")
-                with lock:
+                
+                if waking_status:
+                    print("Server detected as ONLINE!")
                     if wake_start_time > 0:
                         actual_duration = time.time() - wake_start_time
                         print(f"Server took {int(actual_duration)}s to start.")
