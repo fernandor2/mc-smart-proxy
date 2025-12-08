@@ -217,9 +217,9 @@ def start_proxy():
             cmd = [
                 "socat",
                 f"TCP-LISTEN:{LISTEN_PORT},fork,reuseaddr,tcp-nodelay",
-            f"TCP:{REAL_SERVER_IP}:{REAL_SERVER_PORT},tcp-nodelay",
-        ]
-        proxy_process = subprocess.Popen(cmd)
+                f"TCP:{REAL_SERVER_IP}:{REAL_SERVER_PORT},tcp-nodelay",
+            ]
+            proxy_process = subprocess.Popen(cmd)
 
 def stop_proxy():
     global proxy_process
@@ -264,14 +264,15 @@ def handle_client(conn):
 
             if next_state == 1:  # STATUS PING
                 # Mensaje dinámico según el estado de arranque
-                if is_waking:
-                    elapsed = time.time() - wake_start_time if wake_start_time > 0 else 0
-                    remaining = max(0, startup_estimate - int(elapsed))
-                    mins, secs = divmod(remaining, 60)
-                    time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-                    motd_text = f"§e⚙️ Starting... (§6{time_str} left§e)\n§fRefining estimate..."
-                else:
-                    motd_text = MOTD_SLEEPING
+                with lock:
+                    if is_waking:
+                        elapsed = time.time() - wake_start_time if wake_start_time > 0 else 0
+                        remaining = max(0, startup_estimate - int(elapsed))
+                        mins, secs = divmod(remaining, 60)
+                        time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+                        motd_text = f"§e⚙️ Starting... (§6{time_str} left§e)\n§fRefining estimate..."
+                    else:
+                        motd_text = MOTD_SLEEPING
 
                 mc_version, protocol = get_real_server_info()
                 status = {
@@ -286,18 +287,19 @@ def handle_client(conn):
                 start_server()
 
                 # Mensaje dinámico según lo que llevemos esperando
-                if is_waking:
-                    elapsed = time.time() - wake_start_time if wake_start_time > 0 else 0
-                    remaining = max(0, startup_estimate - int(elapsed))
-                    mins, secs = divmod(remaining, 60)
-                    time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-                    kick_text = (
-                        f"§6⚙️ Server is starting...\n\n"
-                        f"§fEst. remaining: §e{time_str}\n"
-                        f"§7We are learning your server speed!"
-                    )
-                else:
-                    kick_text = "§bWake signal sent!\n§7Server will be ready soon."
+                with lock:
+                    if is_waking:
+                        elapsed = time.time() - wake_start_time if wake_start_time > 0 else 0
+                        remaining = max(0, startup_estimate - int(elapsed))
+                        mins, secs = divmod(remaining, 60)
+                        time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+                        kick_text = (
+                            f"§6⚙️ Server is starting...\n\n"
+                            f"§fEst. remaining: §e{time_str}\n"
+                            f"§7We are learning your server speed!"
+                        )
+                    else:
+                        kick_text = "§bWake signal sent!\n§7Server will be ready soon."
 
                 msg = {"text": kick_text}
                 kick_payload = b"\x00" + pack_string(json.dumps(msg))
@@ -307,7 +309,14 @@ def handle_client(conn):
         # print(f"Handshake error: {e}") # Silencio para no ensuciar logs
         pass
     finally:
-        time.sleep(0.5)
+        try:
+            # Cierre elegante TCP: Envia FIN, espera a que cliente cierre o timeout
+            conn.shutdown(socket.SHUT_WR)
+            conn.settimeout(2.0)
+            while conn.recv(1024):
+                pass
+        except Exception:
+            pass
         conn.close()
 
 def run_fake_server():
@@ -421,9 +430,10 @@ def main():
             # Ejecutamos el servidor falso un ratito y volvemos
             run_fake_server()
             
-            if is_waking:
-                # Si estamos esperando que arranque, no spameamos logs, solo esperamos
-                pass
+            with lock:
+                if is_waking:
+                    # Si estamos esperando que arranque, no spameamos logs, solo esperamos
+                    pass
 
         # Actualizamos el estado anterior para la siguiente iteración
         was_ready = server_ready
