@@ -10,7 +10,6 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIGURATION ---
 CRAFTY_URL = os.getenv("CRAFTY_URL", "http://192.168.1.10:8443")
 TOKEN = os.getenv("CRAFTY_TOKEN", "YOUR_API_TOKEN")
 SERVER_ID = os.getenv("SERVER_ID", "1")
@@ -19,29 +18,21 @@ REAL_SERVER_PORT = int(os.getenv("REAL_SERVER_PORT", "25599"))
 REAL_SERVER_IP = os.getenv("REAL_SERVER_IP", "127.0.0.1")
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "10"))*60
 
-# --- AUTO-LEARNING SYSTEM ---
 BOOT_CACHE_FILE = "boot_time.txt"
-
-# Tiempo por defecto para la PRIMERA vez (ej: 60s)
-startup_estimate = 60
-
+startup_estimate = 120
 
 def load_startup_time():
-    """Lee el tiempo de arranque estimado desde disco (si existe)."""
     global startup_estimate
     if os.path.exists(BOOT_CACHE_FILE):
         try:
             with open(BOOT_CACHE_FILE, "r") as f:
                 val = int(float(f.read().strip()))
-                # Mínimo de seguridad para no romper nada
                 startup_estimate = max(10, val)
                 print(f"Loaded stored boot time: {startup_estimate}s")
         except Exception:
             pass
 
-
 def save_startup_time(seconds):
-    """Guarda el nuevo tiempo de arranque aprendido."""
     global startup_estimate
     try:
         startup_estimate = int(seconds)
@@ -51,69 +42,45 @@ def save_startup_time(seconds):
     except Exception as e:
         print(f"Failed to save boot time: {e}")
 
-
-# Cargamos el dato al iniciar el script
 load_startup_time()
 
-# MOTD Settings
 MOTD_SLEEPING = "§6💤 Server is Sleeping\n§fJoin to wake it up!"
 MOTD_WAKING = "§e⚙️ Server is starting...\n§fPlease wait ~20 seconds."
 
-# Global State
 last_active_time = time.time()
 proxy_process = None
 is_waking = False
 wake_start_time = 0
 lock = threading.RLock()
 
-
-# URL mantenida por la comunidad con todas las versiones
 PROTOCOL_DB_URL = "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/common/protocolVersions.json"
 
-
 def get_protocol_map():
-    """Descarga la lista de versiones actualizadas de internet."""
     try:
         resp = requests.get(PROTOCOL_DB_URL, timeout=2)
         if resp.status_code == 200:
-            # Crea un diccionario simple: {'1.20.1': 763, '1.21': 767, ...}
             return {entry["minecraftVersion"]: entry["version"] for entry in resp.json()}
     except Exception:
-        print("⚠️ No se pudo descargar la lista de protocolos. Usando fallback.")
+        print("⚠️ Could not download protocol list. Using fallback.")
     return {}
 
-
 def get_real_server_info():
-    """
-    Obtiene versión y protocolo del servidor real consultando la API de Crafty.
-    """
-    # Valores por defecto (Fallback)
-    version_detectada = "1.21"
-    protocolo = 767
+    detected_version = "1.21"
+    protocol = 767
 
     try:
-        # 1. Obtenemos los detalles del servidor desde la API
         url = f"{CRAFTY_URL}/api/v2/servers/{SERVER_ID}"
         resp = requests.get(url, headers=get_headers(), verify=False, timeout=5)
 
         if resp.status_code == 200:
             data = resp.json().get("data", {})
-            
-            # Buscamos el comando de ejecución o el nombre del ejecutable
-            # Crafty devuelve 'execution_command' con el comando completo (ej: java -jar server-1.20.4.jar)
             crafty_filename = data.get("execution_command") or data.get("executable") or ""
 
-            # 2. Extraemos la versión del texto (ej: "1.20.4")
             match = re.search(r"(\d+\.\d+(\.\d+)?)", crafty_filename)
             if match:
-                version_detectada = match.group(1)
-
-                # 3. Buscamos el protocolo en nuestra lista descargada
+                detected_version = match.group(1)
                 protocol_map = get_protocol_map()
-                protocolo = protocol_map.get(version_detectada, 767) # 767 = 1.21 default
-                
-                # Opcional: Imprimir para debug
-                # print(f"Detected version: {version_detectada} (Proto: {protocolo})")
+                protocol = protocol_map.get(detected_version, 767)
             else:
                 print(f"⚠️ Warning: No version number found in command '{crafty_filename}'")
         else:
@@ -122,7 +89,7 @@ def get_real_server_info():
     except Exception as e:
         print(f"⚠️ Error in get_real_server_info: {e}")
 
-    return version_detectada, protocolo
+    return detected_version, protocol
 
 def pack_varint(value: int) -> bytes:
     out = b""
@@ -158,7 +125,6 @@ def get_server_status():
         return None
 
 def send_start_request_worker():
-    """Hilo de fondo para enviar la petición a la API y manejar errores."""
     global is_waking, wake_start_time
     success = False
     try:
@@ -170,16 +136,15 @@ def send_start_request_worker():
             timeout=5,
         )
         if resp.status_code != 200:
-            print(f"❌ FALLO AL INICIAR: Código {resp.status_code}")
-            print(f"Respuesta Crafty: {resp.text}")
+            print(f"❌ START FAILED: Code {resp.status_code}")
+            print(f"Crafty Response: {resp.text}")
         else:
-            print("✅ Comando de inicio enviado correctamente a Crafty.")
+            print("✅ Start command sent successfully to Crafty.")
             success = True
             
     except Exception as e:
         print(f"Failed to start: {e}")
     
-    # Si falló, reseteamos el estado para permitir reintentos
     if not success:
         with lock:
             print("⚠️ Start request failed. Resetting waking state.")
@@ -234,7 +199,7 @@ def start_proxy():
                 f"TCP:{REAL_SERVER_IP}:{REAL_SERVER_PORT},tcp-nodelay",
             ]
             proxy_process = subprocess.Popen(cmd)
-            is_waking = False # Reset waking state as server is now confirmed UP and Proxy started
+            is_waking = False
 
 def stop_proxy():
     global proxy_process
@@ -248,7 +213,6 @@ def stop_proxy():
                 proxy_process.kill()
             proxy_process = None
 
-# --- MINECRAFT PROTOCOL HANDLERS ---
 def read_bytes(sock, length):
     data = b""
     while len(data) < length:
@@ -276,7 +240,7 @@ def send_packet(sock, data):
 def handle_client(conn):
     global is_waking, wake_start_time, startup_estimate, last_active_time
     try:
-        conn.settimeout(5.0) # More generous timeout
+        conn.settimeout(5.0)
         print(f"Connection received from {conn.getpeername()}")
         
         packet_len = read_varint(conn)
@@ -285,23 +249,25 @@ def handle_client(conn):
         if packet_id == 0x00:
             proto_ver = read_varint(conn)
             addr_len = read_varint(conn)
-            read_bytes(conn, addr_len) # Consume hostname
-            read_bytes(conn, 2)        # Consume port
+            read_bytes(conn, addr_len)
+            read_bytes(conn, 2)
             next_state = read_varint(conn)
 
-            if next_state == 1:  # STATUS PING
-                # Actualizar tiempo de actividad
+            if next_state == 1:
                 with lock:
                     last_active_time = time.time()
                 
-                # Mensaje dinámico según el estado de arranque
                 with lock:
                     if is_waking:
                         elapsed = time.time() - wake_start_time if wake_start_time > 0 else 0
                         remaining = max(0, startup_estimate - int(elapsed))
-                        mins, secs = divmod(remaining, 60)
-                        time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-                        motd_text = f"§e⚙️ Starting... (§6{time_str} left§e)\n§fRefining estimate..."
+                        
+                        if remaining > 0:
+                            mins, secs = divmod(remaining, 60)
+                            time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+                            motd_text = f"§e⚙️ Starting... (§6{time_str} left§e)\n§fRefining estimate..."
+                        else:
+                            motd_text = "§e⚙️ Starting... (§6Almost done...§e)\n§fFinalizing load..."
                     else:
                         motd_text = MOTD_SLEEPING
 
@@ -314,24 +280,30 @@ def handle_client(conn):
                 resp_payload = b"\x00" + pack_string(json.dumps(status))
                 send_packet(conn, resp_payload)
 
-            elif next_state == 2:  # LOGIN ATTEMPT
+            elif next_state == 2:
                 with lock:
                     last_active_time = time.time()
-                # Lanzamos la señal de encendido (es async internamente)
                 start_server()
 
-                # Mensaje dinámico según lo que llevemos esperando
                 with lock:
                     if is_waking:
                         elapsed = time.time() - wake_start_time if wake_start_time > 0 else 0
                         remaining = max(0, startup_estimate - int(elapsed))
-                        mins, secs = divmod(remaining, 60)
-                        time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-                        kick_text = (
-                            f"§6⚙️ Server is starting...\n\n"
-                            f"§fEst. remaining: §e{time_str}\n"
-                            f"§7We are learning your server speed!"
-                        )
+                        
+                        if remaining > 0:
+                            mins, secs = divmod(remaining, 60)
+                            time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+                            kick_text = (
+                                f"§6⚙️ Server is starting...\n\n"
+                                f"§fEst. remaining: §e{time_str}\n"
+                                f"§7We are learning your server speed!"
+                            )
+                        else:
+                            kick_text = (
+                                f"§6⚙️ Server is starting...\n\n"
+                                f"§fStatus: §eFinalizing load...\n"
+                                f"§7Please wait a moment."
+                            )
                     else:
                         kick_text = "§bWake signal sent!\n§7Server will be ready soon."
 
@@ -349,7 +321,6 @@ def handle_client(conn):
         pass
     finally:
         try:
-            # Cierre elegante TCP: Envia FIN, espera a que cliente cierre o timeout
             conn.shutdown(socket.SHUT_WR)
             conn.settimeout(2.0)
             while conn.recv(1024):
@@ -358,46 +329,60 @@ def handle_client(conn):
             pass
         conn.close()
 
+def is_server_fully_ready(ip, port):
+    try:
+        with socket.create_connection((ip, port), timeout=2) as sock:
+            protocol_ver = pack_varint(767) 
+            addr = pack_string(ip)
+            port_bytes = port.to_bytes(2, byteorder='big')
+            next_state = pack_varint(1)
+            
+            handshake_data = protocol_ver + addr + port_bytes + next_state
+            send_packet(sock, b"\x00" + handshake_data)
+            
+            send_packet(sock, b"\x00")
+            
+            _ = read_varint(sock)
+            packet_id = read_varint(sock)
+            
+            if packet_id == 0x00:
+                json_len = read_varint(sock)
+                if json_len > 0:
+                    return True
+    except Exception:
+        pass
+    
+    return False
+
 def check_readiness_worker(stop_event, ready_event):
-    """Hilo de fondo para chequear si el servidor real ya está listo."""
     while not stop_event.is_set():
         try:
-            # 1. API Check
             status = get_server_status()
             should_check_port = False
 
             if status is None:
-                # Fallback: API failure, assume server MIGHT be starting/up, check port
                 should_check_port = True
             else:
                 running, _ = status
                 if running:
                     should_check_port = True
 
-            # 2. Port Check
             if should_check_port:
-                if is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT):
+                if is_server_fully_ready(REAL_SERVER_IP, REAL_SERVER_PORT):
                     ready_event.set()
                     break
         except Exception:
             pass
         
-        # Esperar 1s antes de volver a chequear
         time.sleep(1)
 
 def run_fake_server():
-    """
-    Escucha en 25565 CONTINUAMENTE hasta que el servidor real despierte.
-    Retorna True si salió por Timeout, False si el servidor real está listo.
-    """
     global is_waking, wake_start_time
     
-    # Eventos para controlar el hilo de chequeo
     stop_check = threading.Event()
     server_ready_evt = threading.Event()
     is_timeout = False
     
-    # Arrancar hilo de monitoreo
     t = threading.Thread(target=check_readiness_worker, args=(stop_check, server_ready_evt))
     t.start()
 
@@ -408,18 +393,15 @@ def run_fake_server():
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(('0.0.0.0', LISTEN_PORT))
             s.listen(5)
-            s.settimeout(1.0) # Timeout corto para poder chequear el evento ready_evt
+            s.settimeout(1.0)
             
             while not server_ready_evt.is_set():
-                # --- MEJOR SOLUCIÓN: Protección contra "Arranque Atascado" ---
-                # Si estamos intentando encender (is_waking) y tarda demasiado (> 5 min),
-                # asumimos que falló y reseteamos para permitir intentarlo de nuevo.
                 with lock:
                     checking_waking = is_waking
                     checking_start_time = wake_start_time
 
                 if checking_waking and checking_start_time > 0:
-                    if (time.time() - checking_start_time) > 300: # 5 minutos max para arrancar
+                    if (time.time() - checking_start_time) > 300:
                         print("⚠️ Server stuck in 'Starting' phase for too long. Aborting to force stop.")
                         with lock:
                             is_waking = False
@@ -430,11 +412,9 @@ def run_fake_server():
 
                 try:
                     conn, addr = s.accept()
-                    # Lanzamos el handler en otro hilo
                     client_t = threading.Thread(target=handle_client, args=(conn,))
                     client_t.start()
                 except socket.timeout:
-                    # El timeout es solo para volver a evaluar while not server_ready_evt.is_set()
                     continue 
                 except Exception as e:
                     print(f"Socket error: {e}")
@@ -443,7 +423,6 @@ def run_fake_server():
         print(f"Error binding fake server: {e}")
         time.sleep(2)
     finally:
-        # Limpieza: Parar el hilo de chequeo
         stop_check.set()
         t.join()
         if not is_timeout:
@@ -451,75 +430,72 @@ def run_fake_server():
             
     return is_timeout
 
-# --- MAIN LOOP ---
 def main():
     global last_active_time, is_waking, wake_start_time
     print("--- Smart Manager Started (Auto-Learning) ---")
     
-    was_ready = False # Para detectar transiciones OFF -> ON
-    failed_checks = 0 # Para evitar desconexiones por lag spikes
+    was_ready = False
+    failed_checks = 0
 
     while True:
         status = get_server_status()
         if status is None:
-            # Fallback: Si la API falla, asumimos que "podría" estar corriendo y forzamos check de puerto.
-            # Asumimos players=1 para evitar que el servidor se apague durante un fallo de API.
-            print("⚠️ API Unreachable. Using fallback state (Running=True, Players=1).")
-            running = True
-            players = 1
+            print("⚠️ API Unreachable. Checking ping for fallback status...")
+            if is_server_fully_ready(REAL_SERVER_IP, REAL_SERVER_PORT):
+                running = True
+                players = 0
+                print("   -> Ping OK. Assuming Server ON (Players=0).")
+            else:
+                running = False
+                players = 0
+                print("   -> Ping Failed. Assuming Server OFF.")
         else:
             running, players = status
         
-        # Check if actually ready (TCP connect)
         server_ready = False
         if running:
-            port_open = is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT)
-            if port_open:
+            is_ready_now = is_server_fully_ready(REAL_SERVER_IP, REAL_SERVER_PORT)
+            
+            if is_ready_now:
                 server_ready = True
                 failed_checks = 0
             else:
-                # Si el proxy YA estaba corriendo, damos un margen de error (Lag Spike Protection)
                 with lock:
                     is_proxy_running = proxy_process is not None
                 
                 if is_proxy_running:
                     failed_checks += 1
                     if failed_checks < 3:
-                        print(f"⚠️ Port check failed ({failed_checks}/3). Ignoring temporarily...")
-                        server_ready = True # Mantenemos vivo el proxy
+                        print(f"⚠️ Server ping failed ({failed_checks}/3). Ignoring temporarily...")
+                        server_ready = True
                     else:
                         print("❌ Server confirmed dead after 3 failures.")
                         server_ready = False
                 else:
-                    # Si no estaba corriendo, simplemente no está listo
                     server_ready = False        
         if server_ready:
-            # Detectar si acaba de encenderse (Transición OFF -> ON)
             if not was_ready:
                 print("✨ Server detected as JUST READY. Resetting idle timer.")
                 with lock:
                     last_active_time = time.time()
-                failed_checks = 0 # Reset lag protection counter
+                failed_checks = 0
 
-            # 1. El servidor REAL está encendido Y escuchando
             with lock:
                 waking_status = is_waking
 
             if waking_status:
                 print("Server detected as ONLINE!")
-
-                # --- CÁLCULO Y APRENDIZAJE ---
                 with lock:
                     if wake_start_time > 0:
                         actual_duration = time.time() - wake_start_time
                         print(f"Server took {int(actual_duration)}s to start.")
                         save_startup_time(actual_duration)
-                        wake_start_time = 0  # Reset
+                        wake_start_time = 0
 
                     is_waking = False
                     last_active_time = time.time()
             
-            start_proxy() # Se asegura que socat esté corriendo
+            start_proxy()
             
             should_stop = False
             with lock:
@@ -531,28 +507,21 @@ def main():
             if should_stop:
                 stop_server()
                 stop_proxy()
-                time.sleep(10) # Dar tiempo a que se apague
+                time.sleep(10)
             
-            # CORRECCIÓN CRÍTICA: Esperar para no saturar CPU/API
             time.sleep(5) 
             
         else:
-            # 2. El servidor REAL está apagado O cargando (puerto cerrado)
-            stop_proxy() # Asegurar que socat muere
-            
-            # Ejecutamos el servidor falso un ratito y volvemos
+            stop_proxy()
             timed_out_in_fake = run_fake_server()
             
-            # Si volvimos del fake server por timeout, apagamos.
             if timed_out_in_fake:
                 stop_server()
             
             with lock:
                 if is_waking:
-                    # Si estamos esperando que arranque, no spameamos logs, solo esperamos
                     pass
 
-        # Actualizamos el estado anterior para la siguiente iteración
         was_ready = server_ready
 
 if __name__ == "__main__":
