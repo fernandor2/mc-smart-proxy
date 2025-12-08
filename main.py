@@ -17,7 +17,7 @@ SERVER_ID = os.getenv("SERVER_ID", "1")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "25565"))
 REAL_SERVER_PORT = int(os.getenv("REAL_SERVER_PORT", "25599"))
 REAL_SERVER_IP = os.getenv("REAL_SERVER_IP", "127.0.0.1")
-IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "600"))*60
+IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "10"))*60
 
 # --- AUTO-LEARNING SYSTEM ---
 BOOT_CACHE_FILE = "boot_time.txt"
@@ -248,6 +248,15 @@ def stop_proxy():
             proxy_process = None
 
 # --- MINECRAFT PROTOCOL HANDLERS ---
+def read_bytes(sock, length):
+    data = b""
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk:
+            raise Exception("Connection closed during read")
+        data += chunk
+    return data
+
 def read_varint(sock):
     data = 0
     for i in range(5):
@@ -266,14 +275,17 @@ def send_packet(sock, data):
 def handle_client(conn):
     global is_waking, wake_start_time, startup_estimate, last_active_time
     try:
+        conn.settimeout(5.0) # More generous timeout
+        print(f"Connection received from {conn.getpeername()}")
+        
         packet_len = read_varint(conn)
         packet_id = read_varint(conn)
         
         if packet_id == 0x00:
             proto_ver = read_varint(conn)
             addr_len = read_varint(conn)
-            conn.recv(addr_len) 
-            conn.recv(2)
+            read_bytes(conn, addr_len) # Consume hostname
+            read_bytes(conn, 2)        # Consume port
             next_state = read_varint(conn)
 
             if next_state == 1:  # STATUS PING
@@ -325,9 +337,14 @@ def handle_client(conn):
                 msg = {"text": kick_text}
                 kick_payload = b"\x00" + pack_string(json.dumps(msg))
                 send_packet(conn, kick_payload)
+            else:
+                print(f"Unknown next_state: {next_state}")
+
+        else:
+            print(f"Ignored packet ID: {packet_id} (Expected 0x00 Handshake)")
 
     except Exception as e:
-        # print(f"Handshake error: {e}") # Silencio para no ensuciar logs
+        print(f"Handshake error: {e}") 
         pass
     finally:
         try:
@@ -344,15 +361,23 @@ def check_readiness_worker(stop_event, ready_event):
     """Hilo de fondo para chequear si el servidor real ya está listo."""
     while not stop_event.is_set():
         try:
-            # 1. API Check (Lento)
+            # 1. API Check
             status = get_server_status()
-            if status:
+            should_check_port = False
+
+            if status is None:
+                # Fallback: API failure, assume server MIGHT be starting/up, check port
+                should_check_port = True
+            else:
                 running, _ = status
                 if running:
-                    # 2. Port Check (Rápido)
-                    if is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT):
-                        ready_event.set()
-                        break
+                    should_check_port = True
+
+            # 2. Port Check
+            if should_check_port:
+                if is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT):
+                    ready_event.set()
+                    break
         except Exception:
             pass
         
@@ -384,13 +409,22 @@ def run_fake_server():
             s.settimeout(1.0) # Timeout corto para poder chequear el evento ready_evt
             
             while not server_ready_evt.is_set():
-                # Check timeout para no quedarnos pegados si el servidor nunca arranca
+                # --- MEJOR SOLUCIÓN: Protección contra "Arranque Atascado" ---
+                # Si estamos intentando encender (is_waking) y tarda demasiado (> 5 min),
+                # asumimos que falló y reseteamos para permitir intentarlo de nuevo.
                 with lock:
-                    last_active = last_active_time
-                if (time.time() - last_active) > IDLE_TIMEOUT:
-                    print("⌛ Idle timeout reached inside fake server. Exiting.")
-                    is_timeout = True
-                    break
+                    checking_waking = is_waking
+                    checking_start_time = wake_start_time
+
+                if checking_waking and checking_start_time > 0:
+                    if (time.time() - checking_start_time) > 300: # 5 minutos max para arrancar
+                        print("⚠️ Server stuck in 'Starting' phase for too long. Aborting to force stop.")
+                        with lock:
+                            is_waking = False
+                            wake_start_time = 0
+                        
+                        is_timeout = True
+                        break
 
                 try:
                     conn, addr = s.accept()
