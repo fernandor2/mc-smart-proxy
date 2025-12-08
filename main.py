@@ -234,6 +234,7 @@ def start_proxy():
                 f"TCP:{REAL_SERVER_IP}:{REAL_SERVER_PORT},tcp-nodelay",
             ]
             proxy_process = subprocess.Popen(cmd)
+            is_waking = False # Reset waking state as server is now confirmed UP and Proxy started
 
 def stop_proxy():
     global proxy_process
@@ -389,6 +390,7 @@ def run_fake_server():
     Escucha en 25565 CONTINUAMENTE hasta que el servidor real despierte.
     Retorna True si salió por Timeout, False si el servidor real está listo.
     """
+    global is_waking, wake_start_time
     
     # Eventos para controlar el hilo de chequeo
     stop_check = threading.Event()
@@ -471,26 +473,26 @@ def main():
         # Check if actually ready (TCP connect)
         server_ready = False
         if running:
-                     port_open = is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT)
-                     if port_open:
-                         server_ready = True
-                         failed_checks = 0
-                     else:
-                         # Si el proxy YA estaba corriendo, damos un margen de error (Lag Spike Protection)
-                         with lock:
-                             is_proxy_running = proxy_process is not None
-                         
-                         if is_proxy_running:
-                             failed_checks += 1
-                             if failed_checks < 3:
-                                 print(f"⚠️ Port check failed ({failed_checks}/3). Ignoring temporarily...")
-                                 server_ready = True # Mantenemos vivo el proxy
-                             else:
-                                 print("❌ Server confirmed dead after 3 failures.")
-                                 server_ready = False
-                         else:
-                             # Si no estaba corriendo, simplemente no está listo
-                             server_ready = False        
+            port_open = is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT)
+            if port_open:
+                server_ready = True
+                failed_checks = 0
+            else:
+                # Si el proxy YA estaba corriendo, damos un margen de error (Lag Spike Protection)
+                with lock:
+                    is_proxy_running = proxy_process is not None
+                
+                if is_proxy_running:
+                    failed_checks += 1
+                    if failed_checks < 3:
+                        print(f"⚠️ Port check failed ({failed_checks}/3). Ignoring temporarily...")
+                        server_ready = True # Mantenemos vivo el proxy
+                    else:
+                        print("❌ Server confirmed dead after 3 failures.")
+                        server_ready = False
+                else:
+                    # Si no estaba corriendo, simplemente no está listo
+                    server_ready = False        
         if server_ready:
             # Detectar si acaba de encenderse (Transición OFF -> ON)
             if not was_ready:
@@ -519,13 +521,17 @@ def main():
             
             start_proxy() # Se asegura que socat esté corriendo
             
+            should_stop = False
             with lock:
                 if players > 0:
                     last_active_time = time.time()
                 elif (time.time() - last_active_time) > IDLE_TIMEOUT:
-                    stop_server()
-                    stop_proxy()
-                    time.sleep(10) # Dar tiempo a que se apague
+                    should_stop = True
+            
+            if should_stop:
+                stop_server()
+                stop_proxy()
+                time.sleep(10) # Dar tiempo a que se apague
             
             # CORRECCIÓN CRÍTICA: Esperar para no saturar CPU/API
             time.sleep(5) 
