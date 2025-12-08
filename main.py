@@ -307,6 +307,7 @@ def handle_client(conn):
         # print(f"Handshake error: {e}") # Silencio para no ensuciar logs
         pass
     finally:
+        time.sleep(0.5)
         conn.close()
 
 def run_fake_server():
