@@ -64,7 +64,7 @@ last_active_time = time.time()
 proxy_process = None
 is_waking = False
 wake_start_time = 0
-lock = threading.Lock()
+lock = threading.RLock()
 
 
 # URL mantenida por la comunidad con todas las versiones
@@ -159,12 +159,14 @@ def get_server_status():
 
 def start_server():
     global is_waking, wake_start_time
-    if is_waking:
-        return
-    print("Wake signal received! Starting server...")
-    is_waking = True
-    # Inicio del cronómetro de arranque
-    wake_start_time = time.time()
+    with lock:
+        if is_waking:
+            return
+        print("Wake signal received! Starting server...")
+        is_waking = True
+        # Inicio del cronómetro de arranque
+        wake_start_time = time.time()
+    
     try:
         url = f"{CRAFTY_URL}/api/v2/servers/{SERVER_ID}/action/start_server"
         # Guardamos la respuesta en 'resp'
@@ -206,30 +208,30 @@ def is_port_open(ip, port):
 
 def start_proxy():
     global proxy_process, is_waking
-    if proxy_process is not None and proxy_process.poll() is not None:
-        print("⚠️ Proxy process died surprisingly. Clearing state.")
-        proxy_process = None
-    if proxy_process is None:
-        print(f"Server is UP. Starting socat proxy to {REAL_SERVER_IP}:{REAL_SERVER_PORT}...")
-        cmd = [
-            "socat",
-            f"TCP-LISTEN:{LISTEN_PORT},fork,reuseaddr,tcp-nodelay",
+    with lock:
+        if proxy_process is not None and proxy_process.poll() is not None:
+            print("⚠️ Proxy process died surprisingly. Clearing state.")
+            proxy_process = None
+        if proxy_process is None:
+            print(f"Server is UP. Starting socat proxy to {REAL_SERVER_IP}:{REAL_SERVER_PORT}...")
+            cmd = [
+                "socat",
+                f"TCP-LISTEN:{LISTEN_PORT},fork,reuseaddr,tcp-nodelay",
             f"TCP:{REAL_SERVER_IP}:{REAL_SERVER_PORT},tcp-nodelay",
         ]
         proxy_process = subprocess.Popen(cmd)
-        with lock:
-            is_waking = False
 
 def stop_proxy():
     global proxy_process
-    if proxy_process:
-        print("Stopping proxy...")
-        proxy_process.terminate()
-        try:
-            proxy_process.wait(timeout=2)
-        except:
-            proxy_process.kill()
-        proxy_process = None
+    with lock:
+        if proxy_process:
+            print("Stopping proxy...")
+            proxy_process.terminate()
+            try:
+                proxy_process.wait(timeout=2)
+            except:
+                proxy_process.kill()
+            proxy_process = None
 
 # --- MINECRAFT PROTOCOL HANDLERS ---
 def read_varint(sock):
@@ -281,8 +283,7 @@ def handle_client(conn):
                 send_packet(conn, resp_payload)
 
             elif next_state == 2:  # LOGIN ATTEMPT
-                with lock:
-                    start_server()
+                start_server()
 
                 # Mensaje dinámico según lo que llevemos esperando
                 if is_waking:
@@ -362,7 +363,10 @@ def main():
                  failed_checks = 0
              else:
                  # Si el proxy YA estaba corriendo, damos un margen de error (Lag Spike Protection)
-                 if proxy_process is not None:
+                 with lock:
+                     is_proxy_running = proxy_process is not None
+                 
+                 if is_proxy_running:
                      failed_checks += 1
                      if failed_checks < 3:
                          print(f"⚠️ Port check failed ({failed_checks}/3). Ignoring temporarily...")
@@ -379,6 +383,7 @@ def main():
             if not was_ready:
                 print("✨ Server detected as JUST READY. Resetting idle timer.")
                 last_active_time = time.time()
+                failed_checks = 0 # Reset lag protection counter
 
             # 1. El servidor REAL está encendido Y escuchando
             if is_waking:
