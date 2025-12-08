@@ -157,34 +157,48 @@ def get_server_status():
         print(f"Error getting server status: {e}")
         return None
 
-def start_server():
+def send_start_request_worker():
+    """Hilo de fondo para enviar la petición a la API y manejar errores."""
     global is_waking, wake_start_time
-    with lock:
-        if is_waking:
-            return
-        print("Wake signal received! Starting server...")
-        is_waking = True
-        # Inicio del cronómetro de arranque
-        wake_start_time = time.time()
-    
+    success = False
     try:
         url = f"{CRAFTY_URL}/api/v2/servers/{SERVER_ID}/action/start_server"
-        # Guardamos la respuesta en 'resp'
         resp = requests.post(
             url,
             headers=get_headers(),
             verify=False,
             timeout=5,
         )
-        # Imprimimos si salió bien o mal
         if resp.status_code != 200:
             print(f"❌ FALLO AL INICIAR: Código {resp.status_code}")
             print(f"Respuesta Crafty: {resp.text}")
         else:
             print("✅ Comando de inicio enviado correctamente a Crafty.")
+            success = True
             
     except Exception as e:
         print(f"Failed to start: {e}")
+    
+    # Si falló, reseteamos el estado para permitir reintentos
+    if not success:
+        with lock:
+            print("⚠️ Start request failed. Resetting waking state.")
+            is_waking = False
+            wake_start_time = 0
+
+def start_server():
+    global is_waking, wake_start_time
+    should_start = False
+    
+    with lock:
+        if not is_waking:
+            print("Wake signal received! Starting server...")
+            is_waking = True
+            wake_start_time = time.time()
+            should_start = True
+
+    if should_start:
+        threading.Thread(target=send_start_request_worker, daemon=True).start()
 
 def stop_server():
     print("Idle timeout reached. Stopping server...")
@@ -250,7 +264,7 @@ def send_packet(sock, data):
     sock.sendall(pack_varint(len(data)) + data)
 
 def handle_client(conn):
-    global is_waking, wake_start_time, startup_estimate
+    global is_waking, wake_start_time, startup_estimate, last_active_time
     try:
         packet_len = read_varint(conn)
         packet_id = read_varint(conn)
@@ -263,6 +277,10 @@ def handle_client(conn):
             next_state = read_varint(conn)
 
             if next_state == 1:  # STATUS PING
+                # Actualizar tiempo de actividad
+                with lock:
+                    last_active_time = time.time()
+                
                 # Mensaje dinámico según el estado de arranque
                 with lock:
                     if is_waking:
@@ -284,6 +302,9 @@ def handle_client(conn):
                 send_packet(conn, resp_payload)
 
             elif next_state == 2:  # LOGIN ATTEMPT
+                with lock:
+                    last_active_time = time.time()
+                # Lanzamos la señal de encendido (es async internamente)
                 start_server()
 
                 # Mensaje dinámico según lo que llevemos esperando
@@ -319,35 +340,80 @@ def handle_client(conn):
             pass
         conn.close()
 
+def check_readiness_worker(stop_event, ready_event):
+    """Hilo de fondo para chequear si el servidor real ya está listo."""
+    while not stop_event.is_set():
+        try:
+            # 1. API Check (Lento)
+            status = get_server_status()
+            if status:
+                running, _ = status
+                if running:
+                    # 2. Port Check (Rápido)
+                    if is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT):
+                        ready_event.set()
+                        break
+        except Exception:
+            pass
+        
+        # Esperar 1s antes de volver a chequear
+        time.sleep(1)
+
 def run_fake_server():
-    """Escucha en 25565 PERO devuelve el control periódicamente."""
-    # CORRECCIÓN CRÍTICA: Bindear y cerrar el socket en cada ciclo es más seguro
-    # para evitar conflictos con socat, o usar timeout para salir.
+    """
+    Escucha en 25565 CONTINUAMENTE hasta que el servidor real despierte.
+    Retorna True si salió por Timeout, False si el servidor real está listo.
+    """
     
+    # Eventos para controlar el hilo de chequeo
+    stop_check = threading.Event()
+    server_ready_evt = threading.Event()
+    is_timeout = False
+    
+    # Arrancar hilo de monitoreo
+    t = threading.Thread(target=check_readiness_worker, args=(stop_check, server_ready_evt))
+    t.start()
+
+    print(">> Fake Server Listening (Waiting for Real Server)...")
+
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(('0.0.0.0', LISTEN_PORT))
             s.listen(5)
-            s.settimeout(2) # Tiempo máximo de escucha antes de volver a chequear API
+            s.settimeout(1.0) # Timeout corto para poder chequear el evento ready_evt
             
-            # Intentamos aceptar conexiones durante un breve periodo
-            start_wait = time.time()
-            # Escuchamos solo por 5 segundos antes de salir para chequear estado
-            while (time.time() - start_wait) < 5: 
+            while not server_ready_evt.is_set():
+                # Check timeout para no quedarnos pegados si el servidor nunca arranca
+                with lock:
+                    last_active = last_active_time
+                if (time.time() - last_active) > IDLE_TIMEOUT:
+                    print("⌛ Idle timeout reached inside fake server. Exiting.")
+                    is_timeout = True
+                    break
+
                 try:
                     conn, addr = s.accept()
-                    t = threading.Thread(target=handle_client, args=(conn,))
-                    t.start()
+                    # Lanzamos el handler en otro hilo
+                    client_t = threading.Thread(target=handle_client, args=(conn,))
+                    client_t.start()
                 except socket.timeout:
-                    # Nadie se conectó, salimos del while para checkear API
-                    break 
+                    # El timeout es solo para volver a evaluar while not server_ready_evt.is_set()
+                    continue 
                 except Exception as e:
                     print(f"Socket error: {e}")
-                    break
+                    time.sleep(1)
     except Exception as e:
         print(f"Error binding fake server: {e}")
-        time.sleep(1) # Evitar spam si el puerto está ocupado
+        time.sleep(2)
+    finally:
+        # Limpieza: Parar el hilo de chequeo
+        stop_check.set()
+        t.join()
+        if not is_timeout:
+            print(">> Real Server Ready! Switch to Proxy.")
+            
+    return is_timeout
 
 # --- MAIN LOOP ---
 def main():
@@ -360,43 +426,50 @@ def main():
     while True:
         status = get_server_status()
         if status is None:
-            time.sleep(3)
-            continue
-        running, players = status
+            # Fallback: Si la API falla, asumimos que "podría" estar corriendo y forzamos check de puerto.
+            # Asumimos players=1 para evitar que el servidor se apague durante un fallo de API.
+            print("⚠️ API Unreachable. Using fallback state (Running=True, Players=1).")
+            running = True
+            players = 1
+        else:
+            running, players = status
         
         # Check if actually ready (TCP connect)
         server_ready = False
         if running:
-             port_open = is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT)
-             if port_open:
-                 server_ready = True
-                 failed_checks = 0
-             else:
-                 # Si el proxy YA estaba corriendo, damos un margen de error (Lag Spike Protection)
-                 with lock:
-                     is_proxy_running = proxy_process is not None
-                 
-                 if is_proxy_running:
-                     failed_checks += 1
-                     if failed_checks < 3:
-                         print(f"⚠️ Port check failed ({failed_checks}/3). Ignoring temporarily...")
-                         server_ready = True # Mantenemos vivo el proxy
+                     port_open = is_port_open(REAL_SERVER_IP, REAL_SERVER_PORT)
+                     if port_open:
+                         server_ready = True
+                         failed_checks = 0
                      else:
-                         print("❌ Server confirmed dead after 3 failures.")
-                         server_ready = False
-                 else:
-                     # Si no estaba corriendo, simplemente no está listo
-                     server_ready = False
-        
+                         # Si el proxy YA estaba corriendo, damos un margen de error (Lag Spike Protection)
+                         with lock:
+                             is_proxy_running = proxy_process is not None
+                         
+                         if is_proxy_running:
+                             failed_checks += 1
+                             if failed_checks < 3:
+                                 print(f"⚠️ Port check failed ({failed_checks}/3). Ignoring temporarily...")
+                                 server_ready = True # Mantenemos vivo el proxy
+                             else:
+                                 print("❌ Server confirmed dead after 3 failures.")
+                                 server_ready = False
+                         else:
+                             # Si no estaba corriendo, simplemente no está listo
+                             server_ready = False        
         if server_ready:
             # Detectar si acaba de encenderse (Transición OFF -> ON)
             if not was_ready:
                 print("✨ Server detected as JUST READY. Resetting idle timer.")
-                last_active_time = time.time()
+                with lock:
+                    last_active_time = time.time()
                 failed_checks = 0 # Reset lag protection counter
 
             # 1. El servidor REAL está encendido Y escuchando
-            if is_waking:
+            with lock:
+                waking_status = is_waking
+
+            if waking_status:
                 print("Server detected as ONLINE!")
 
                 # --- CÁLCULO Y APRENDIZAJE ---
@@ -406,19 +479,19 @@ def main():
                         print(f"Server took {int(actual_duration)}s to start.")
                         save_startup_time(actual_duration)
                         wake_start_time = 0  # Reset
-                # -----------------------------
 
                     is_waking = False
-                last_active_time = time.time()
+                    last_active_time = time.time()
             
             start_proxy() # Se asegura que socat esté corriendo
             
-            if players > 0:
-                last_active_time = time.time()
-            elif (time.time() - last_active_time) > IDLE_TIMEOUT:
-                stop_server()
-                stop_proxy()
-                time.sleep(10) # Dar tiempo a que se apague
+            with lock:
+                if players > 0:
+                    last_active_time = time.time()
+                elif (time.time() - last_active_time) > IDLE_TIMEOUT:
+                    stop_server()
+                    stop_proxy()
+                    time.sleep(10) # Dar tiempo a que se apague
             
             # CORRECCIÓN CRÍTICA: Esperar para no saturar CPU/API
             time.sleep(5) 
@@ -428,7 +501,11 @@ def main():
             stop_proxy() # Asegurar que socat muere
             
             # Ejecutamos el servidor falso un ratito y volvemos
-            run_fake_server()
+            timed_out_in_fake = run_fake_server()
+            
+            # Si volvimos del fake server por timeout, apagamos.
+            if timed_out_in_fake:
+                stop_server()
             
             with lock:
                 if is_waking:
